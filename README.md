@@ -1,25 +1,16 @@
-# Fuzzy Logic System
+# Type-1 Fuzzy Logic System
 
-A Python fuzzy logic framework with a complete LiDAR-based autonomous robot navigation example using ROS 2.
+A Python library implementing the full Type-1 Mamdani fuzzy inference pipeline — fuzzification, rule evaluation, and defuzzification — with a complete worked example: a ROS 2 node that reads a 2D LiDAR scan and drives a robot using fuzzy logic for obstacle avoidance and right-wall following.
 
-## Overview
-
-This project provides reusable fuzzy logic components — fuzzification, inference, and defuzzification — alongside a practical robot controller that demonstrates multiple intelligent control strategies:
-
-- Obstacle avoidance
-- Wall/edge following
-- Subsumption control
-- Context blending
-- PID control
-
-## Repository Structure
+## Architecture
 
 ```
-fuzzy-logic-system/
-├── fuzzy.py                    # Core fuzzy logic engine
-├── common.py                   # Membership function library
-└── LiDAR_robot_example_code.py # ROS 2 robot controller application
+membership_functions.py       # Membership function factories (triangular, trapezoid, gaussian)
+fuzzy.py                      # Fuzzifier → Inference → Defuzzifier pipeline
+LiDAR_robot_example_code.py  # ROS 2 robot controller built on the above
 ```
+
+The library is framework-agnostic. `fuzzy.py` takes any callables as membership functions and any dict of `Fuzzifier` objects as inputs — no ROS 2 dependency.
 
 ## Dependencies
 
@@ -27,105 +18,108 @@ fuzzy-logic-system/
 pip install numpy matplotlib
 ```
 
-ROS 2 is required only for the robot controller example:
+ROS 2 is required only for the robot controller example. See the [official installation guide](https://docs.ros.org/en/rolling/Installation.html).
 
-```bash
-# Follow the official ROS 2 installation guide for your platform
-# https://docs.ros.org/en/rolling/Installation.html
-```
+## Core modules
 
-## Core Modules
+### `membership_functions.py`
 
-### `common.py` — Membership Functions
-
-Provides standard fuzzy membership function shapes:
+Factories that return a callable `membership(x)` accepting scalars or NumPy arrays:
 
 | Function | Signature | Description |
 |---|---|---|
-| `triangular` | `(a, b, c)` | Triangular shape |
-| `trapezoid` | `(a, b, c, d)` | Trapezoidal shape |
-| `gaussian` | `(a, theta)` | Gaussian/bell curve |
-| `plot` | `(fn, range, label)` | Plot any membership function |
+| `triangular` | `(a, b, c)` | Triangular shape with peak at `b` |
+| `trapezoid` | `(a, b, c, d)` | Trapezoidal shape; handles degenerate edges (`a==b`, `c==d`) |
+| `gaussian` | `(a, theta)` | Gaussian bell curve centred at `a` |
+| `plot` | `(fn, x_range, num_points, title)` | Plot any membership function |
 
-### `fuzzy.py` — Fuzzy Logic Engine
+### `fuzzy.py`
 
-Three classes that implement the full fuzzy inference pipeline:
+Three classes that implement the Mamdani inference pipeline:
 
-**`Fuzzifier`** — converts crisp sensor readings into fuzzy membership degrees
-- `calc_membership_values()` — compute membership degrees for each linguistic label
-- `plot_membership_functions()` — visualise membership functions; optionally mark a crisp input
+**`Fuzzifier`** — converts a crisp sensor reading into a dict of membership degrees, one per linguistic label.
+- `calc_membership_values(crisp_input)` — evaluate all membership functions at `crisp_input`; result stored in `self.membership_values`
+- `plot_membership_functions(x_range, num_points)` — visualise all functions; marks `crisp_input` if set
 
-**`Inference`** — Mamdani-style rule evaluation
-- `compute_firing_strengths()` — apply min-operator to evaluate all rules
-- `print_rule_evaluation()` — print a formatted rule-firing summary
+**`Inference`** — evaluates a rule base against a set of fuzzified inputs.
+- Rules are tuples of `(variable_name, label)` pairs; antecedents come first, consequents last
+- `compute_firing_strengths()` — applies the AND (min) operator across each rule's antecedents; returns `[(rule, strength), ...]`
+- `print_rule_evaluation()` — formatted rule-by-rule summary
 
-**`Defuzzifier`** — converts fuzzy outputs back to a crisp value
-- `defuzzify()` — weighted average of output peaks based on firing strengths
-
-### `LiDAR_robot_example_code.py` — Robot Controller
-
-A ROS 2 node that reads a `/scan` LaserScan topic and publishes velocity commands to `/cmd_vel`.
-
-**LiDAR input regions:**
-
-| Region | Purpose |
-|---|---|
-| Front | Obstacle detection |
-| Front-Left / Front-Right | Directional obstacle avoidance |
-| Right-Front / Right-Back | Wall following |
-| Left / Right | General spatial awareness |
-
-**Fuzzy rule sets:**
-- Obstacle avoidance — 27 rules over `{close, medium, far}` inputs
-- Right edge following — 9 rules over right-front and right-back distances
-
-**Output variables:**
-- Linear velocity — `slow / moderate / fast` (0.05–0.5 m/s)
-- Angular velocity — `left / straight / right` (−0.65 to +0.65 rad/s)
-
-**Control modes** (toggled via flags in the script):
-
-| Mode | Description |
-|---|---|
-| Obstacle avoidance | Pure fuzzy obstacle avoidance |
-| Right edge following | Fuzzy wall-following |
-| Subsumption | Obstacle avoidance takes priority over wall following |
-| Context blending | Weighted combination of both behaviours |
-| PID | Maintains a desired distance from the wall (Kp=0.7, Ki=0.002, Kd=20) |
-
-**Safety:** an emergency stop triggers if any obstacle is detected within 0.2 m.
+**`Defuzzifier`** — produces crisp output values from firing strengths using the centre-of-singletons method (weighted average of output peaks).
+- `defuzzify()` — returns a dict of crisp output values; returns `0.0` for any output whose total firing strength is zero
 
 ## Usage
 
-### Using the fuzzy logic library
-
 ```python
-import numpy as np
-from common import triangular, trapezoid
+import membership_functions as mf
 from fuzzy import Fuzzifier, Inference, Defuzzifier
 
 # Define membership functions for an input variable
-mf = {
-    "close":  triangular(0.0, 0.0, 0.5),
-    "medium": triangular(0.25, 0.5, 0.75),
-    "far":    triangular(0.5, 1.0, 1.0),
-}
+distance_fuzzy_set = [
+    ('close',  mf.trapezoid(0.0, 0.0, 0.2, 0.4)),
+    ('medium', mf.triangular(0.2, 0.4, 0.6)),
+    ('far',    mf.trapezoid(0.4, 1.2, 15.0, 15.0)),
+]
 
 # Fuzzify a crisp sensor reading
-fuzzifier = Fuzzifier(mf)
-memberships = fuzzifier.calc_membership_values(crisp_value=0.3)
+fuzzifier = Fuzzifier(distance_fuzzy_set)
+memberships = fuzzifier.calc_membership_values(crisp_input=0.3)
+# {'close': 0.5, 'medium': 0.5, 'far': 0.0}
 
-# Evaluate rules and defuzzify
-# (see LiDAR_robot_example_code.py for a complete worked example)
+# Define rules: (antecedent pairs..., consequent pairs...)
+rules = [
+    (('distance', 'close'),  ('speed', 'slow')),
+    (('distance', 'medium'), ('speed', 'moderate')),
+    (('distance', 'far'),    ('speed', 'fast')),
+]
+
+inference = Inference({'distance': fuzzifier}, rules)
+firing_strengths = inference.compute_firing_strengths()
+
+# Output peak values (centre of each output singleton)
+output_peaks = {
+    'speed': {'slow': 0.1, 'moderate': 0.3, 'fast': 0.5}
+}
+
+crisp_output = Defuzzifier(firing_strengths, output_peaks).defuzzify()
+# {'speed': 0.2}
 ```
 
-### Running the robot controller
+## Robot controller example
+
+`LiDAR_robot_example_code.py` is a ROS 2 node that subscribes to `/scan` (`sensor_msgs/LaserScan`) and publishes to `/cmd_vel` (`geometry_msgs/Twist`).
+
+**LiDAR regions used:**
+
+| Key | Sector |
+|---|---|
+| `front` | Forward obstacle detection |
+| `front_left` / `front_right` | Directional obstacle avoidance |
+| `right_front` / `right_back` | Right-wall following |
+| `left` / `right` | General spatial awareness |
+
+**Fuzzy rule sets:**
+- Obstacle avoidance — 27 rules over `{close, medium, far}` × 3 inputs
+- Right-wall following — 9 rules over right-front and right-back distances
+
+**Output variables:**
+- `speed` — `slow / moderate / fast` mapped to 0.05–0.5 m/s
+- `direction` — `left / straight / right` mapped to ±0.65 rad/s
+
+**Control modes** (set via flags at the top of the script):
+
+| Flag | Mode |
+|---|---|
+| `OA_ONLY` | Pure fuzzy obstacle avoidance |
+| `RF_ONLY` | Pure fuzzy right-wall following |
+| `PID_FLAG` | PID right-wall following (Kp=0.7, Ki=0.002, Kd=20) |
+| `CONTEXT_BLENDING_FLAG` | Weighted blend of obstacle avoidance and wall following |
+| all `False` | Subsumption: obstacle avoidance takes priority, wall following otherwise |
+
+Emergency stop activates at < 0.2 m on any front-facing sensor.
 
 ```bash
 # Source your ROS 2 workspace, then:
 python3 LiDAR_robot_example_code.py
 ```
-
-The node expects:
-- `/scan` — `sensor_msgs/LaserScan`
-- `/cmd_vel` — `geometry_msgs/Twist` (published)
